@@ -6,17 +6,18 @@ const builtin = std.builtin;
 
 pub fn build(b: *std.build.Builder) void
 {
-    const exe = b.addExecutable("bootx64", "src/main.zig");
-    exe.setBuildMode(b.standardReleaseOptions());
-    exe.setTarget(CrossTarget
+    const install_dir = "efi/boot";
+    const uefi_bootloader = b.addExecutable("bootx64", "src/uefi.zig");
+    uefi_bootloader.setBuildMode(b.standardReleaseOptions());
+    uefi_bootloader.setTarget(CrossTarget
         {
             .cpu_arch = Target.Cpu.Arch.x86_64,
             .os_tag = Target.Os.Tag.uefi,
             .abi = Target.Abi.msvc,
         });
-    exe.force_pic = true;
-    exe.setOutputDir("efi/boot");
-    exe.install();
+    uefi_bootloader.force_pic = true;
+    uefi_bootloader.setOutputDir(install_dir);
+    uefi_bootloader.install();
 
     const cmd = &[_][]const u8
     {
@@ -29,9 +30,23 @@ pub fn build(b: *std.build.Builder) void
         "stdio",
     };
 
+    const kernel = b.addExecutable("kernel.elf", "src/main.zig");
+    kernel.addAssemblyFile("src/start.S");
+    kernel.setBuildMode(b.standardReleaseOptions());
+    kernel.setTarget(CrossTarget
+        {
+            .cpu_arch = Target.Cpu.Arch.x86_64,
+            .os_tag = Target.Os.Tag.freestanding,
+            .abi = Target.Abi.none,
+        });
+    kernel.setOutputDir(install_dir);
+    kernel.install();
+    kernel.step.dependOn(&uefi_bootloader.step);
+
     const run_step = b.addSystemCommand(cmd);
 
     const run_command = b.step("run", "Run the kernel");
-    run_command.dependOn(&exe.step);
+    run_command.dependOn(&uefi_bootloader.step);
+    run_command.dependOn(&kernel.step);
     run_command.dependOn(&run_step.step);
 }
