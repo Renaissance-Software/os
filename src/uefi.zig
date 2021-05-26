@@ -268,6 +268,7 @@ pub fn main() void
 
     var file_content_ptr: [*]align(16) u8 = undefined;
     assert_success(boot_services.allocatePool(.BootServicesData, file_size, &file_content_ptr), @src());
+    assert_success(kernel_file.read(&file_size, file_content_ptr), @src());
     const file_content = file_content_ptr[0..file_size];
     var elf_file_header = @ptrCast(*Elf64.FileHeader, file_content.ptr);
     print("ELF64 file header:\n{}\n", .{elf_file_header.*});
