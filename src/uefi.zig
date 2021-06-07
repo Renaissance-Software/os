@@ -22,7 +22,7 @@ fn panic(comptime format: []const u8, args: anytype, source: std.builtin.SourceL
 {
     print("PANIC at {s}:{}:{}, {s}()", .{source.file, source.line, source.column, source.fn_name});
     print(format, args);
-    _ = boot_services.stall(10000 * 5 * 1000 * 1000);
+    assert_success(boot_services.exit(uefi.handle, uefi.Status.CrcError, 0, null), @src());
 }
 
 fn assert_eq(comptime T: type, a: T, b: T, source: std.builtin.SourceLocation) void
@@ -45,7 +45,7 @@ fn assert_success(result: uefi.Status, source: std.builtin.SourceLocation) void
 {
     if (result != uefi.Status.Success)
     {
-        panic("{s} failed: {}", .{source.fn_name, result}, @src());
+        panic("{s} failed: {}", .{source.fn_name, result}, source);
     }
 }
 
@@ -273,7 +273,30 @@ pub fn main() void
     var elf_file_header = @ptrCast(*Elf64.FileHeader, file_content.ptr);
     print("ELF64 file header:\n{}\n", .{elf_file_header.*});
 
+    assert(@sizeOf(Elf64.ProgramHeader) == elf_file_header.program_header_size, @src());
+    assert_success(kernel_file.setPosition(elf_file_header.program_header_offset), @src());
+    const program_header_count = elf_file_header.program_header_entry_count;
+    print("Program header count: {}\n", .{program_header_count});
+    var program_headers_size: u64 = program_header_count * elf_file_header.program_header_size;
+    var program_headers: [*]Elf64.ProgramHeader = undefined;
+    assert_success(boot_services.allocatePool(.LoaderData, program_headers_size, @ptrCast(*[*] align(8) u8, &program_headers)), @src());
+    assert_success(kernel_file.read(&program_headers_size, @ptrCast([*]u8, program_headers)), @src());
+    const program_header_slice = program_headers[0..program_header_count];
+
+    for (program_header_slice) |ph|
+    {
+        const header_type = ph.type;
+        if (header_type < 10 and @intToEnum(Elf64.ProgramHeader.ProgramHeaderType, header_type) == Elf64.ProgramHeader.ProgramHeaderType.load)
+        {
+            const size_in_memory = ph.size_in_memory;
+            const pages = (size_in_memory + 0x1000 - 1) / 0x1000;
+            var segment = ph.physical_address;
+            print("Size in memory: {}. Pages: {}. Segment: {}\n", .{size_in_memory, pages, segment});
+            assert_success(boot_services.allocatePages(.AllocateAddress, .LoaderData, pages, @ptrCast(*[*] align(4096) u8, &segment)), @src());
+        }
+    }
+
     print("Everything succeeded\n", .{});
 
-    _ = boot_services.stall(10 * 5 * 1000 * 1000);
+    //const FnPtrType = fn () i32;
 }

@@ -22,12 +22,13 @@ pub fn build(b: *std.build.Builder) void
     const cmd = &[_][]const u8
     {
         "qemu-system-x86_64",
+        "-nographic",
         "-bios",
         "/usr/share/edk2-ovmf/x64/OVMF_CODE.fd",
         "-hdd",
         "fat:rw:.",
-        "-serial",
-        "stdio",
+        //"-serial",
+        //"stdio",
     };
 
     const kernel = b.addExecutable("kernel.elf", "src/main.zig");
