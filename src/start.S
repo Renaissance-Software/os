@@ -3,6 +3,8 @@
 .section .text
 .global _start
 
+.extern foo
+
 _start:
-    mov eax, 123849
+    call foo
     ret
