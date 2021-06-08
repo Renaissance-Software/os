@@ -18,11 +18,20 @@ fn print(comptime format: []const u8, args: anytype) void
     _ = con_out.outputString(&[_:0]u16 {'\r', '\n'});
 }
 
-fn panic(comptime format: []const u8, args: anytype, source: std.builtin.SourceLocation) void
+fn hlt() noreturn
+{
+    while (true)
+    {
+        asm volatile("hlt");
+    }
+}
+
+fn panic(comptime format: []const u8, args: anytype, source: std.builtin.SourceLocation) noreturn
 {
     print("PANIC at {s}:{}:{}, {s}()", .{source.file, source.line, source.column, source.fn_name});
     print(format, args);
-    assert_success(boot_services.exit(uefi.handle, uefi.Status.CrcError, 0, null), @src());
+
+    hlt();
 }
 
 fn assert_eq(comptime T: type, a: T, b: T, source: std.builtin.SourceLocation) void
@@ -269,34 +278,103 @@ pub fn main() void
     var file_content_ptr: [*]align(16) u8 = undefined;
     assert_success(boot_services.allocatePool(.BootServicesData, file_size, &file_content_ptr), @src());
     assert_success(kernel_file.read(&file_size, file_content_ptr), @src());
-    const file_content = file_content_ptr[0..file_size];
-    var elf_file_header = @ptrCast(*Elf64.FileHeader, file_content.ptr);
-    print("ELF64 file header:\n{}\n", .{elf_file_header.*});
-
-    assert(@sizeOf(Elf64.ProgramHeader) == elf_file_header.program_header_size, @src());
-    assert_success(kernel_file.setPosition(elf_file_header.program_header_offset), @src());
-    const program_header_count = elf_file_header.program_header_entry_count;
-    print("Program header count: {}\n", .{program_header_count});
-    var program_headers_size: u64 = program_header_count * elf_file_header.program_header_size;
-    var program_headers: [*]Elf64.ProgramHeader = undefined;
-    assert_success(boot_services.allocatePool(.LoaderData, program_headers_size, @ptrCast(*[*] align(8) u8, &program_headers)), @src());
-    assert_success(kernel_file.read(&program_headers_size, @ptrCast([*]u8, program_headers)), @src());
-    const program_header_slice = program_headers[0..program_header_count];
-
-    for (program_header_slice) |ph|
+    if (file_size < @sizeOf(std.elf.Elf64_Ehdr))
     {
-        const header_type = ph.type;
-        if (header_type < 10 and @intToEnum(Elf64.ProgramHeader.ProgramHeaderType, header_type) == Elf64.ProgramHeader.ProgramHeaderType.load)
+        panic("File size too small: {}\n", .{file_size}, @src());
+    }
+
+    const file_content = file_content_ptr[0..file_size];
+    var elf_buffer = std.io.fixedBufferStream(file_content);
+    var elf_header = std.elf.Header.read(&elf_buffer) catch |err| {
+        panic("Failed to read ELF header\n", .{}, @src());
+    };
+    print("Entry: 0x{x}", .{elf_header.entry});
+
+    const kernel_size: u64 = blk:
+    {
+        var it = elf_header.program_header_iterator(&elf_buffer);
+        var size: u64 = 0;
+
+        while (it.next() catch panic("Iterating pheaders", .{}, @src())) |ph|
         {
-            const size_in_memory = ph.size_in_memory;
-            const pages = (size_in_memory + 0x1000 - 1) / 0x1000;
-            var segment = ph.physical_address;
-            print("Size in memory: {}. Pages: {}. Segment: {}\n", .{size_in_memory, pages, segment});
-            assert_success(boot_services.allocatePages(.AllocateAddress, .LoaderData, pages, @ptrCast(*[*] align(4096) u8, &segment)), @src());
+            if (ph.p_type == std.elf.PT_LOAD)
+            {
+                const size_in_memory = ph.p_memsz;
+                print("Size in memory: {}", .{size_in_memory});
+                size = std.math.max(size, ph.p_memsz);
+            }
+        }
+
+        break :blk size;
+    };
+
+    print("Kernel size: {}\n", .{kernel_size});
+
+    var memory_map: [*]uefi.tables.MemoryDescriptor = undefined;
+    var memory_map_size: u64 = 0;
+    var memory_map_key: u64 = 0;
+    var descriptor_size: u64 = 0;
+    var descriptor_version: u32 = 0;
+
+    while (boot_services.getMemoryMap(&memory_map_size, memory_map, &memory_map_key, &descriptor_size, &descriptor_version) == .BufferTooSmall)
+    {
+        print("Allocating...\n", .{});
+        assert_success(boot_services.allocatePool(uefi.tables.MemoryType.BootServicesData, memory_map_size, @ptrCast(*[*] align(8) u8, &memory_map)), @src());
+    }
+
+    var largest_conventional: ?*uefi.tables.MemoryDescriptor = null;
+
+    {
+        var offset: u64 = 0;
+        var i: u64 = 0;
+
+        while (offset < memory_map_size):
+            ({ offset += descriptor_size; i += 1; })
+        {
+            const ptr = @intToPtr(*uefi.tables.MemoryDescriptor, @ptrToInt(memory_map) + offset);
+            if (ptr.type == .ConventionalMemory)
+            {
+                if (largest_conventional) |current_largest|
+                {
+                    if (ptr.number_of_pages > current_largest.number_of_pages)
+                    {
+                        largest_conventional = ptr;
+                    }
+                }
+                else
+                {
+                    largest_conventional = ptr;
+                }
+            }
         }
     }
 
-    print("Everything succeeded\n", .{});
+    print("largest_conventional: {}\n", .{largest_conventional});
 
-    //const FnPtrType = fn () i32;
+    const conventional_start = largest_conventional.?.physical_start;
+    const conventional_bytes = largest_conventional.?.number_of_pages << 12;
+
+    var it = elf_header.program_header_iterator(&elf_buffer);
+
+    while (it.next() catch panic("Iterating program headers", .{}, @src())) |ph|
+    {
+        if (ph.p_type == std.elf.PT_LOAD)
+        {
+            const target = ph.p_vaddr; //+ conventional_start;
+            std.mem.copy(u8, @intToPtr([*]u8, target)[0..ph.p_filesz], file_content[ph.p_offset .. ph.p_offset + ph.p_filesz]);
+            if (ph.p_memsz > ph.p_filesz)
+            {
+                std.mem.set(u8, @intToPtr([*]u8, target)[ph.p_filesz..ph.p_memsz], 0);
+            }
+        }
+    }
+
+    const EntryPointType = fn() callconv(.SysV) i32;
+    const entry_point = @intToPtr(EntryPointType, elf_header.entry);
+    //assert_success(boot_services.exitBootServices(uefi.handle, memory_map_key), @src());
+    const number = entry_point();
+    print("Entry point result: {}\n", .{number});
+
+    print("Everything succeeded\n", .{});
+    hlt();
 }

@@ -4,5 +4,5 @@
 .global _start
 
 _start:
-    mov eax, 123
+    mov eax, 123849
     ret
