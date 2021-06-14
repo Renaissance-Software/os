@@ -22,10 +22,9 @@ pub fn build(b: *std.build.Builder) void
     const cmd = &[_][]const u8
     {
         "qemu-system-x86_64",
-        "-nographic",
+        //"-nographic",
         "-bios",
         "ovmf/OVMF_CODE-pure-efi.fd",
-        //"/home/david/git/os/ovmf/OVMF_CODE-pure-efi.fd",
         "-hdd",
         "fat:rw:.",
         //"-serial",
@@ -33,7 +32,6 @@ pub fn build(b: *std.build.Builder) void
     };
 
     const kernel = b.addExecutable("kernel.elf", "src/main.zig");
-    kernel.addAssemblyFile("src/start.S");
     kernel.setBuildMode(b.standardReleaseOptions());
     kernel.setTarget(CrossTarget
         {
@@ -51,4 +49,22 @@ pub fn build(b: *std.build.Builder) void
     run_command.dependOn(&uefi_bootloader.step);
     run_command.dependOn(&kernel.step);
     run_command.dependOn(&run_step.step);
+
+    const debug_cmd = &[_][]const u8
+    {
+        "qemu-system-x86_64",
+        "-bios",
+        "ovmf/OVMF_CODE-pure-efi.fd",
+        "-hdd",
+        "fat:rw:.",
+        "-S",
+        "-s",
+    };
+
+    const debug_step = b.addSystemCommand(debug_cmd);
+
+    const debug_command = b.step("debug", "Debug the kernel");
+    debug_command.dependOn(&uefi_bootloader.step);
+    debug_command.dependOn(&kernel.step);
+    debug_command.dependOn(&debug_step.step);
 }

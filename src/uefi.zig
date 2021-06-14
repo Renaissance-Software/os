@@ -1,5 +1,6 @@
 const std = @import("std");
 const uefi = std.os.uefi;
+const PSF = @import("psf.zig");
 
 var con_out: *uefi.protocols.SimpleTextOutputProtocol = undefined;
 var boot_services: *uefi.tables.BootServices = undefined;
@@ -232,6 +233,59 @@ const Elf64 = struct
         };
     };
 };
+pub const GraphicsOutputProtocolMode = extern struct {
+    max_mode: u32,
+    mode: u32,
+    info: *GraphicsOutputModeInformation,
+    size_of_info: usize,
+    frame_buffer_base: u64,
+    frame_buffer_size: usize,
+};
+
+pub const GraphicsOutputModeInformation = extern struct {
+    version: u32 = undefined,
+    horizontal_resolution: u32 = undefined,
+    vertical_resolution: u32 = undefined,
+    pixel_format: GraphicsPixelFormat = undefined,
+    pixel_information: PixelBitmask = undefined,
+    pixels_per_scan_line: u32 = undefined,
+};
+
+pub const GOP = extern struct
+{
+    base: u64,
+    size: u64,
+    width: u32,
+    height: u32,
+    pixels_per_scanline: u32,
+
+    fn initialize() GOP
+    {
+        var graphics: *uefi.protocols.GraphicsOutputProtocol = undefined;
+        assert_success(boot_services.locateProtocol(&uefi.protocols.GraphicsOutputProtocol.guid, null, @ptrCast(*?*c_void, &graphics)), @src());
+        const fb_width = graphics.mode.info.horizontal_resolution;
+        const fb_height = graphics.mode.info.vertical_resolution;
+        const fb_base = graphics.mode.frame_buffer_base;
+        const fb_size = graphics.mode.frame_buffer_size;
+        const fb_pixels_per_scanline = graphics.mode.info.pixels_per_scan_line;
+        const fb = @intToPtr([*]u32, fb_base);
+
+        print("Base: {}. Size: {}. Width: {}. Height: {}. Pixels per scanline: {}", .{fb_base, fb_size, fb_width, fb_height, fb_pixels_per_scanline});
+
+        print("Foo: {}\n", .{fb_size / fb_width / fb_height});
+        return GOP
+        {
+            .base = fb_base,
+            .size = fb_size,
+            .width = fb_width,
+            .height = fb_height,
+            .pixels_per_scanline = fb_pixels_per_scanline,
+        };
+    }
+};
+
+var gop: GOP = undefined;
+var font: PSF.Font = undefined;
 
 pub fn main() void
 {
@@ -310,6 +364,8 @@ pub fn main() void
 
     print("Kernel size: {}\n", .{kernel_size});
 
+    gop = GOP.initialize();
+
     var memory_map: [*]uefi.tables.MemoryDescriptor = undefined;
     var memory_map_size: u64 = 0;
     var memory_map_key: u64 = 0;
@@ -349,8 +405,6 @@ pub fn main() void
         }
     }
 
-    print("largest_conventional: {}\n", .{largest_conventional});
-
     const conventional_start = largest_conventional.?.physical_start;
     const conventional_bytes = largest_conventional.?.number_of_pages << 12;
 
@@ -369,12 +423,37 @@ pub fn main() void
         }
     }
 
-    const EntryPointType = fn() callconv(.SysV) i32;
+    const EntryPointType = fn(*GOP, *PSF.Font) callconv(.SysV) i32;
     const entry_point = @intToPtr(EntryPointType, elf_header.entry);
-    //assert_success(boot_services.exitBootServices(uefi.handle, memory_map_key), @src());
-    const number = entry_point();
-    print("Entry point result: {}\n", .{number});
+    const font_file = load_file(file_protocol, "zap-light16.psf");
+    var font_header: *PSF.Header = undefined;
+    assert_success(boot_services.allocatePool(.LoaderData, handle_list_size, @ptrCast(*[*] align(8) u8, &font_header)), @src());
+    var psf_header_size: u64 = @sizeOf(PSF.Header);
+    assert_success(font_file.read(&psf_header_size, @ptrCast([*]u8, font_header)), @src());
+    assert_eq(u8, font_header.magic[0], PSF.magic[0], @src());
+    assert_eq(u8, font_header.magic[1], PSF.magic[1], @src());
 
-    print("Everything succeeded\n", .{});
+    var font_buffer_size: u64 = switch (font_header.mode)
+    {
+        1 => @intCast(u64, font_header.char_size) * 512,
+        else => @intCast(u64, font_header.char_size) * 256,
+    };
+
+    print("Font buffer size: {}\n", .{font_buffer_size});
+
+    assert_success(font_file.setPosition(psf_header_size), @src());
+    var font_buffer_ptr: [*]u8 = undefined;
+    assert_success(boot_services.allocatePool(.LoaderData, font_buffer_size, @ptrCast(*[*] align(8) u8, &font_buffer_ptr)), @src());
+    assert_success(font_file.read(&font_buffer_size, font_buffer_ptr), @src());
+    font.header = font_header;
+    font.buffer.* = PSF.Buffer {
+        .ptr = font_buffer_ptr,
+        .size = font_buffer_size,
+    };
+
+    print("Entering entry point...", .{});
+    //assert_success(boot_services.exitBootServices(uefi.handle, memory_map_key), @src());
+    const number = entry_point(&gop, &font);
+
     hlt();
 }

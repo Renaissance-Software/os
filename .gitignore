@@ -4,3 +4,4 @@ NvVars
 efi/
 *.elf
 *.o
+.gdb_history
