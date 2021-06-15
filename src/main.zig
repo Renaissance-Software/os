@@ -16,6 +16,31 @@ const Renderer = struct
     x: u32,
     y: u32,
 
+    fn init(boot_data: *uefi.BootData) void
+    {
+        const framebuffer_pixel_type = u32;
+        const framebuffer_len = boot_data.gop.size / @sizeOf(framebuffer_pixel_type);
+        renderer = Renderer
+        {
+            .frame = @intToPtr([*]framebuffer_pixel_type, boot_data.gop.base)[0..framebuffer_len],
+            .font = boot_data.font.buffer.ptr[0..boot_data.font.buffer.size / @sizeOf(u8)],
+            .x = 0,
+            .y = 0,
+        };
+
+        Renderer.character_size = boot_data.font.header.char_size;
+        Renderer.width = boot_data.gop.width;
+        Renderer.height = boot_data.gop.height;
+        Renderer.pixels_per_scanline = boot_data.gop.pixels_per_scanline;
+
+        const space_to_obviate = Renderer.character_size + (Renderer.height % Renderer.character_size);
+        Renderer.line_limit = Renderer.height - space_to_obviate;
+
+        renderer.clear(0xff000000);
+
+        print("Renderer initialized successfully\n", .{});
+    }
+
     fn render_char(self: *Renderer, ch: u8, xo: u32, yo: u32) void
     {
         var font_index = @as(u64, ch) * Renderer.character_size;
@@ -96,9 +121,9 @@ const Renderer = struct
         self.x = 0;
     }
 
-    fn clear(self: *Renderer) void
+    fn clear(self: *Renderer, color: u32) void
     {
-        std.mem.set(u32, self.frame, 0x000000ff);
+        std.mem.set(u32, self.frame, color);
     }
 
     fn clear_well(self: *Renderer) void
@@ -143,29 +168,35 @@ fn print(comptime format: []const u8, args: anytype) void
 
 var renderer: Renderer = undefined;
 
+var memory_size: u64 = 0;
+
+const Memory = struct
+{
+    var mm_size: u64 = 0;
+    const page_size = 4096;
+
+    fn init(boot_data: *uefi.BootData) void
+    {
+        const map_entry_count = boot_data.memory.size / boot_data.memory.descriptor_size;
+        print("Memory map size: {}\n", .{boot_data.memory.size});
+        print("Map entry count: {}\n", .{map_entry_count});
+
+        const memory_map = boot_data.memory.map[0..map_entry_count];
+
+        for (memory_map) |map_entry|
+        {
+            mm_size += map_entry.number_of_pages * page_size;
+        }
+
+        print("Memory map size: {}\n", .{mm_size});
+        print("Memory initialized successfully!\n", .{});
+    }
+};
+
 export fn _start(boot_data: *uefi.BootData) callconv(.C) noreturn
 {
-    const framebuffer_pixel_type = u32;
-    const framebuffer_len = boot_data.gop.size / @sizeOf(framebuffer_pixel_type);
-    renderer = Renderer
-    {
-        .frame = @intToPtr([*]framebuffer_pixel_type, boot_data.gop.base)[0..framebuffer_len],
-        .font = boot_data.font.buffer.ptr[0..boot_data.font.buffer.size / @sizeOf(u8)],
-        .x = 0,
-        .y = 0,
-    };
-
-    Renderer.character_size = boot_data.font.header.char_size;
-    Renderer.width = boot_data.gop.width;
-    Renderer.height = boot_data.gop.height;
-    Renderer.pixels_per_scanline = boot_data.gop.pixels_per_scanline;
-    
-    const space_to_obviate = Renderer.character_size + (Renderer.height % Renderer.character_size);
-    Renderer.line_limit = Renderer.height - space_to_obviate;
-
-    renderer.clear();
-
-    print("Space to obviate: {}\n", .{space_to_obviate});
+    Renderer.init(boot_data);
+    Memory.init(boot_data);
 
     arch.hlt();
 }

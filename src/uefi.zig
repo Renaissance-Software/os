@@ -362,18 +362,20 @@ pub fn main() noreturn
 
         while (it.next() catch panic("Iterating pheaders", .{}, @src())) |ph|
         {
+            print("Type: {}. Address: 0x{x}", .{ph.p_type, ph.p_vaddr});
+
             if (ph.p_type == std.elf.PT_LOAD)
             {
                 const size_in_memory = ph.p_memsz;
                 print("Size in memory: {}", .{size_in_memory});
                 size = std.math.max(size, ph.p_memsz);
             }
+
+            print("", .{});
         }
 
         break :blk size;
     };
-
-    print("Kernel size: {}\n", .{kernel_size});
 
     uefi_info.gop = GOP.initialize();
 
@@ -383,17 +385,22 @@ pub fn main() noreturn
     while (boot_services.getMemoryMap(&uefi_info.memory.size, uefi_info.memory.map, &memory_map_key, &uefi_info.memory.descriptor_size, &descriptor_version) == .BufferTooSmall)
     {
         print("Allocating...\n", .{});
-        assert_success(boot_services.allocatePool(uefi.tables.MemoryType.BootServicesData, uefi_info.memory.size, @ptrCast(*[*] align(8) u8, &uefi_info.memory.map)), @src());
+        assert_success(boot_services.allocatePool(.LoaderData, uefi_info.memory.size, @ptrCast(*[*] align(8) u8, &uefi_info.memory.map)), @src());
     }
+
+    var it = elf_header.program_header_iterator(&elf_buffer);
+    var phi: u64 = 0;
 
     var largest_conventional: ?*uefi.tables.MemoryDescriptor = null;
 
     {
-        var offset: u64 = 0;
-        var i: u64 = 0;
-
-        while (offset < uefi_info.memory.size):
-            ({ offset += uefi_info.memory.descriptor_size; i += 1; })
+        var offset: usize = 0;
+        var i: usize = 0;
+        while (offset < uefi_info.memory.size) :
+            ({
+                offset += uefi_info.memory.descriptor_size;
+                i += 1;
+            })
         {
             const ptr = @intToPtr(*uefi.tables.MemoryDescriptor, @ptrToInt(uefi_info.memory.map) + offset);
             if (ptr.type == .ConventionalMemory)
@@ -413,22 +420,47 @@ pub fn main() noreturn
         }
     }
 
-    const conventional_start = largest_conventional.?.physical_start;
+    // Just take the single biggest bit of conventional memory.
+    const conventional_start = largest_conventional.?.virtual_start;
     const conventional_bytes = largest_conventional.?.number_of_pages << 12;
 
-    var it = elf_header.program_header_iterator(&elf_buffer);
+    print("Conventional_start: {}. Bytes: {}", .{conventional_start, conventional_bytes});
 
     while (it.next() catch panic("Iterating program headers", .{}, @src())) |ph|
     {
+        print("Index {}", .{phi});
+
         if (ph.p_type == std.elf.PT_LOAD)
         {
-            const target = ph.p_vaddr; //+ conventional_start;
-            std.mem.copy(u8, @intToPtr([*]u8, target)[0..ph.p_filesz], file_content[ph.p_offset .. ph.p_offset + ph.p_filesz]);
+            print("Load", .{});
+            //if (true)
+            //{
+
+            const pages = (ph.p_memsz + 0x1000 - 1) / 0x1000;
+            print("After pages\n", .{});
+            var segment = @intToPtr([*] align(4096) u8, ph.p_paddr);
+            assert_success(boot_services.allocatePages(.AllocateAddress, .LoaderData, pages, &segment), @src());
+            print("After pages allocation\n", .{});
+            std.mem.copy(u8, segment[0..ph.p_filesz], file_content[ph.p_offset .. ph.p_offset + ph.p_filesz]);
+            print("After pages copy\n", .{});
             if (ph.p_memsz > ph.p_filesz)
             {
-                std.mem.set(u8, @intToPtr([*]u8, target)[ph.p_filesz..ph.p_memsz], 0);
+                std.mem.set(u8, segment[ph.p_filesz..ph.p_memsz], 0);
             }
+            
+            //}
+            //else
+            //{
+                //const target = ph.p_vaddr;
+                //std.mem.copy(u8, @intToPtr([*]u8, target)[0..ph.p_filesz], file_content[ph.p_offset .. ph.p_offset + ph.p_filesz]);
+                //print("Load", .{});
+                //if (ph.p_memsz > ph.p_filesz)
+                //{
+                    //std.mem.set(u8, @intToPtr([*]u8, target)[ph.p_filesz..ph.p_memsz], 0);
+                //}
+            //}
         }
+        phi += 1;
     }
 
     const EntryPointType = fn(*BootData) callconv(.SysV) noreturn;
