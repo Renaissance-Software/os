@@ -172,8 +172,100 @@ var memory_size: u64 = 0;
 
 const Memory = struct
 {
-    var mm_size: u64 = 0;
+    var size: u64 = 0;
     const page_size = 4096;
+
+    const PageAllocator = struct
+    {
+        bitmap: []u8,
+        free_memory: u64,
+        used_memory: u64,
+
+        fn new(bitmap_address: u64) PageAllocator
+        {
+            const bitmap_size = size / page_size / 8 + 1;
+
+            var page_allocator = PageAllocator
+            {
+                .bitmap = @intToPtr([*]u8, bitmap_address)[0..bitmap_size],
+                .free_memory = size,
+                .used_memory = 0,
+            };
+
+            print("Page allocator bitmap size: {}\n", .{bitmap_size});
+
+            std.mem.set(u8, page_allocator.bitmap, 0);
+
+            return page_allocator;
+        }
+
+        fn is_page_reserved(self: *PageAllocator, index: u64) bool
+        {
+            const byte_index = index / 8;
+            const bit_index: u3 = @intCast(u3, index % 8);
+            const bit_indexer = @intCast(u8, 0b10000000) >> bit_index;
+
+            return self.bitmap[byte_index] & bit_indexer > 0;
+        }
+
+        fn set_page_reserved(self: *PageAllocator, index: u64, value: bool) void
+        {
+            const byte_index = index / 8;
+            const bit_index: u3 = @intCast(u3, index % 8);
+            const bit_indexer = @intCast(u8, 0b10000000) >> bit_index;
+            self.bitmap[byte_index] &= ~bit_indexer;
+            if (value)
+            {
+                self.bitmap[byte_index] |= bit_indexer;
+            }
+        }
+
+        fn reserve_pages(self: *PageAllocator, address: u64, page_count: u64) void
+        {
+            const top_address = address + (page_count * page_size);
+            var page_address: u64 = address;
+            while (page_address < top_address) : (page_address += page_size)
+            {
+                self.reserve_page(page_address);
+            }
+        }
+
+        fn free_pages(self: *PageAllocator, address: u64, page_count: u64) void
+        {
+            const top_address = address + (page_count * page_size);
+            var page_address: u64 = address;
+            while (page_address < top_address) : (page_address += page_size)
+            {
+                self.free_page(page_address);
+            }
+        }
+
+        fn reserve_page(self: *PageAllocator, address: u64) void
+        {
+            const page_index = address / page_size;
+            if (self.is_page_reserved(page_index))
+            {
+                return;
+            }
+
+            self.set_page_reserved(page_index, true);
+            self.free_memory -= page_size;
+            self.used_memory += page_size;
+        }
+
+        fn free_page(self: *PageAllocator, address: u64) void
+        {
+            const page_index = address / page_size;
+            if (!self.is_page_reserved(index))
+            {
+                return;
+            }
+
+            self.set_page_reserved(index, false);
+            self.free_memory += page_size;
+            self.used_memory -= page_size;
+        }
+    };
 
     fn init(boot_data: *uefi.BootData) void
     {
@@ -185,10 +277,44 @@ const Memory = struct
 
         for (memory_map) |map_entry|
         {
-            mm_size += map_entry.number_of_pages * page_size;
+            size += map_entry.number_of_pages * page_size;
         }
 
-        print("Memory map size: {}\n", .{mm_size});
+        var largest_free_memory_block: u64 = 0;
+        var largest_free_memory_block_size: u64 = 0;
+
+        for (memory_map) |map_entry|
+        {
+            if (map_entry.type == .ConventionalMemory)
+            {
+                if (map_entry.number_of_pages * page_size > largest_free_memory_block)
+                {
+                    largest_free_memory_block = map_entry.physical_start;
+                    largest_free_memory_block_size = map_entry.number_of_pages * page_size;
+                }
+            }
+        }
+
+        print("Memory map size: {}\n", .{size});
+        print("Largest block: 0x{x} at 0x{x}\n", .{largest_free_memory_block_size, largest_free_memory_block});
+
+        var page_allocator = PageAllocator.new(largest_free_memory_block);
+        print("Page allocator set up\n", .{});
+        page_allocator.reserve_pages(largest_free_memory_block, page_allocator.bitmap.len / page_size + 1);
+        print("Reserved pages for page allocator bitmap\n", .{});
+
+        var reserved: u64 = 0;
+        for (memory_map) |map_entry|
+        {
+            if (map_entry.type != .ConventionalMemory)
+            {
+                print("<{x},{}", .{map_entry.physical_start, map_entry.number_of_pages});
+                page_allocator.reserve_pages(map_entry.physical_start, map_entry.number_of_pages);
+                reserved += 1;
+                print("R{}>", .{reserved});
+            }
+        }
+
         print("Memory initialized successfully!\n", .{});
     }
 };

@@ -27,8 +27,8 @@ pub fn build(b: *std.build.Builder) void
         "ovmf/OVMF_CODE-pure-efi.fd",
         "-hdd",
         "fat:rw:.",
-        //"-serial",
-        //"stdio",
+        "-serial",
+        "stdio",
     };
 
     const kernel = b.addExecutable("kernel.elf", "src/main.zig");
