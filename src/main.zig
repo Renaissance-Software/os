@@ -1,5 +1,6 @@
 const std = @import("std");
 const uefi = @import("uefi.zig");
+const arch = @import("arch/x86_64/intrinsics.zig");
 const PSF = @import("psf.zig");
 
 const Point = extern struct
@@ -7,7 +8,6 @@ const Point = extern struct
     x: u32,
     y: u32,
 };
-
 
 const Renderer = struct
 {
@@ -143,31 +143,29 @@ fn print(comptime format: []const u8, args: anytype) void
 
 var renderer: Renderer = undefined;
 
-export fn _start(gop: *uefi.GOP, font: *PSF.Font) callconv(.C) i32
+export fn _start(boot_data: *uefi.BootData) callconv(.C) noreturn
 {
-    var framebuffer = @intToPtr([*]u32, gop.base)[0..gop.size/4];
-    std.mem.set(u32, framebuffer, 0x000000ff);
+    const framebuffer_pixel_type = u32;
+    const framebuffer_len = boot_data.gop.size / @sizeOf(framebuffer_pixel_type);
     renderer = Renderer
     {
-        .frame = @intToPtr([*]u32, gop.base)[0..gop.size / @sizeOf(u32)],
-        .font = font.buffer.ptr[0..font.buffer.size / @sizeOf(u8)],
+        .frame = @intToPtr([*]framebuffer_pixel_type, boot_data.gop.base)[0..framebuffer_len],
+        .font = boot_data.font.buffer.ptr[0..boot_data.font.buffer.size / @sizeOf(u8)],
         .x = 0,
         .y = 0,
     };
 
-    Renderer.character_size = font.header.char_size;
-    Renderer.width = gop.width;
-    Renderer.height = gop.height;
-    Renderer.pixels_per_scanline = gop.pixels_per_scanline;
+    Renderer.character_size = boot_data.font.header.char_size;
+    Renderer.width = boot_data.gop.width;
+    Renderer.height = boot_data.gop.height;
+    Renderer.pixels_per_scanline = boot_data.gop.pixels_per_scanline;
     
     const space_to_obviate = Renderer.character_size + (Renderer.height % Renderer.character_size);
     Renderer.line_limit = Renderer.height - space_to_obviate;
 
-    var i: u64 = 0;
-    while (i < 123) : (i += 1)
-    {
-        print("Frame: {}\n", .{i});
-    }
+    renderer.clear();
 
-    return 123;
+    print("Space to obviate: {}\n", .{space_to_obviate});
+
+    arch.hlt();
 }

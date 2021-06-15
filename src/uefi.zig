@@ -1,6 +1,7 @@
 const std = @import("std");
 const uefi = std.os.uefi;
 const PSF = @import("psf.zig");
+const arch = @import("arch/x86_64/intrinsics.zig");
 
 var con_out: *uefi.protocols.SimpleTextOutputProtocol = undefined;
 var boot_services: *uefi.tables.BootServices = undefined;
@@ -16,23 +17,20 @@ fn print(comptime format: []const u8, args: anytype) void
         const fake_c = [2]u16 { c, 0 };
         _ = con_out.outputString(@ptrCast(*const [1:0]u16, &fake_c));
     }
+
     _ = con_out.outputString(&[_:0]u16 {'\r', '\n'});
 }
 
-fn hlt() noreturn
-{
-    while (true)
-    {
-        asm volatile("hlt");
-    }
-}
 
 fn panic(comptime format: []const u8, args: anytype, source: std.builtin.SourceLocation) noreturn
 {
     print("PANIC at {s}:{}:{}, {s}()", .{source.file, source.line, source.column, source.fn_name});
     print(format, args);
 
-    hlt();
+    while (true)
+    {
+    }
+    //arch.hlt();
 }
 
 fn assert_eq(comptime T: type, a: T, b: T, source: std.builtin.SourceLocation) void
@@ -284,10 +282,23 @@ pub const GOP = extern struct
     }
 };
 
-var gop: GOP = undefined;
-var font: PSF.Font = undefined;
+pub const Memory = extern struct
+{
+    map: [*]uefi.tables.MemoryDescriptor,
+    size: u64,
+    descriptor_size: u64,
+};
 
-pub fn main() void
+pub const BootData = extern struct
+{
+    gop: GOP,
+    font: PSF.Font,
+    memory: Memory,
+};
+
+var uefi_info: BootData = undefined;
+
+pub fn main() noreturn
 {
     boot_services = uefi.system_table.boot_services.?;
     runtime_services = uefi.system_table.runtime_services;
@@ -364,18 +375,15 @@ pub fn main() void
 
     print("Kernel size: {}\n", .{kernel_size});
 
-    gop = GOP.initialize();
+    uefi_info.gop = GOP.initialize();
 
-    var memory_map: [*]uefi.tables.MemoryDescriptor = undefined;
-    var memory_map_size: u64 = 0;
-    var memory_map_key: u64 = 0;
-    var descriptor_size: u64 = 0;
+    var memory_map_key: usize = undefined;
     var descriptor_version: u32 = 0;
 
-    while (boot_services.getMemoryMap(&memory_map_size, memory_map, &memory_map_key, &descriptor_size, &descriptor_version) == .BufferTooSmall)
+    while (boot_services.getMemoryMap(&uefi_info.memory.size, uefi_info.memory.map, &memory_map_key, &uefi_info.memory.descriptor_size, &descriptor_version) == .BufferTooSmall)
     {
         print("Allocating...\n", .{});
-        assert_success(boot_services.allocatePool(uefi.tables.MemoryType.BootServicesData, memory_map_size, @ptrCast(*[*] align(8) u8, &memory_map)), @src());
+        assert_success(boot_services.allocatePool(uefi.tables.MemoryType.BootServicesData, uefi_info.memory.size, @ptrCast(*[*] align(8) u8, &uefi_info.memory.map)), @src());
     }
 
     var largest_conventional: ?*uefi.tables.MemoryDescriptor = null;
@@ -384,10 +392,10 @@ pub fn main() void
         var offset: u64 = 0;
         var i: u64 = 0;
 
-        while (offset < memory_map_size):
-            ({ offset += descriptor_size; i += 1; })
+        while (offset < uefi_info.memory.size):
+            ({ offset += uefi_info.memory.descriptor_size; i += 1; })
         {
-            const ptr = @intToPtr(*uefi.tables.MemoryDescriptor, @ptrToInt(memory_map) + offset);
+            const ptr = @intToPtr(*uefi.tables.MemoryDescriptor, @ptrToInt(uefi_info.memory.map) + offset);
             if (ptr.type == .ConventionalMemory)
             {
                 if (largest_conventional) |current_largest|
@@ -423,7 +431,7 @@ pub fn main() void
         }
     }
 
-    const EntryPointType = fn(*GOP, *PSF.Font) callconv(.SysV) i32;
+    const EntryPointType = fn(*BootData) callconv(.SysV) noreturn;
     const entry_point = @intToPtr(EntryPointType, elf_header.entry);
     const font_file = load_file(file_protocol, "zap-light16.psf");
     var font_header: *PSF.Header = undefined;
@@ -445,15 +453,14 @@ pub fn main() void
     var font_buffer_ptr: [*]u8 = undefined;
     assert_success(boot_services.allocatePool(.LoaderData, font_buffer_size, @ptrCast(*[*] align(8) u8, &font_buffer_ptr)), @src());
     assert_success(font_file.read(&font_buffer_size, font_buffer_ptr), @src());
-    font.header = font_header;
-    font.buffer.* = PSF.Buffer {
+    uefi_info.font.header = font_header;
+    uefi_info.font.buffer.* = PSF.Buffer {
         .ptr = font_buffer_ptr,
         .size = font_buffer_size,
     };
 
     print("Entering entry point...", .{});
-    //assert_success(boot_services.exitBootServices(uefi.handle, memory_map_key), @src());
-    const number = entry_point(&gop, &font);
+    _ = boot_services.exitBootServices(uefi.handle, memory_map_key);
 
-    hlt();
+    entry_point(&uefi_info);
 }
