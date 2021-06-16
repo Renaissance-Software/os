@@ -313,7 +313,7 @@ pub fn main() noreturn
 
     while (boot_services.locateHandle(.ByProtocol, &uefi.protocols.SimpleFileSystemProtocol.guid, null, &handle_list_size, handle_list) == .BufferTooSmall)
     {
-        assert_success(boot_services.allocatePool(uefi.tables.MemoryType.BootServicesData, handle_list_size, @ptrCast(*[*] align(8) u8, &handle_list)), @src());
+        assert_success(boot_services.allocatePool(.LoaderData, handle_list_size, @ptrCast(*[*] align(8) u8, &handle_list)), @src());
     }
 
     assert(handle_list_size > 0, @src());
@@ -341,7 +341,7 @@ pub fn main() noreturn
     assert_success(kernel_file.setPosition(0), @src());
 
     var file_content_ptr: [*]align(16) u8 = undefined;
-    assert_success(boot_services.allocatePool(.BootServicesData, file_size, &file_content_ptr), @src());
+    assert_success(boot_services.allocatePool(.LoaderData, file_size, &file_content_ptr), @src());
     assert_success(kernel_file.read(&file_size, file_content_ptr), @src());
     if (file_size < @sizeOf(std.elf.Elf64_Ehdr))
     {

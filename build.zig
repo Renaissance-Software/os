@@ -57,6 +57,8 @@ pub fn build(b: *std.build.Builder) void
         "ovmf/OVMF_CODE-pure-efi.fd",
         "-hdd",
         "fat:rw:.",
+        "-serial",
+        "stdio",
         "-S",
         "-s",
     };
