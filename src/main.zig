@@ -18,6 +18,7 @@ pub fn kernel_panic(comptime format: []const u8, args: anytype) noreturn
 
 pub fn panic(message: []const u8, stack_trace: ?*std.builtin.StackTrace) noreturn
 {
+    @setCold(true);
     print("Panic: {s}\n", .{message});
 
     arch.hlt();
@@ -384,7 +385,7 @@ const Memory = struct
     }
 };
 
-export fn _start(boot_data: *uefi.BootData) callconv(.C) noreturn
+export fn _start(boot_data: *uefi.BootData) callconv(.SysV) noreturn
 {
     Renderer.init(boot_data);
     Memory.init(boot_data);

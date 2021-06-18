@@ -268,9 +268,8 @@ pub const GOP = extern struct
         const fb_pixels_per_scanline = graphics.mode.info.pixels_per_scan_line;
         const fb = @intToPtr([*]u32, fb_base);
 
-        print("Base: {}. Size: {}. Width: {}. Height: {}. Pixels per scanline: {}", .{fb_base, fb_size, fb_width, fb_height, fb_pixels_per_scanline});
+        print("[FRAMEBUFFER] Base: 0x{x}. Size: {}. Width: {}. Height: {}", .{fb_base, fb_size, fb_width, fb_height}); 
 
-        print("Foo: {}\n", .{fb_size / fb_width / fb_height});
         return GOP
         {
             .base = fb_base,
@@ -306,8 +305,6 @@ pub fn main() noreturn
 
     _ = con_out.reset(false);
 
-    print("Hello kernel", .{});
-
     var handle_list_size: usize = 0;
     var handle_list: [*]uefi.Handle = undefined;
 
@@ -317,8 +314,6 @@ pub fn main() noreturn
     }
 
     assert(handle_list_size > 0, @src());
-
-    print("Handle list count: {}", .{handle_list_size});
 
     const handle_count = handle_list_size / @sizeOf(uefi.Handle);
     assert_eq(u64, handle_count, 1, @src());
@@ -337,7 +332,6 @@ pub fn main() noreturn
     var file_size: u64 = 0;
     assert_success(kernel_file.setPosition(uefi.protocols.FileProtocol.efi_file_position_end_of_file), @src());
     assert_success(kernel_file.getPosition(&file_size), @src());
-    print("File size: {} bytes", .{file_size});
     assert_success(kernel_file.setPosition(0), @src());
 
     var file_content_ptr: [*]align(16) u8 = undefined;
@@ -353,7 +347,7 @@ pub fn main() noreturn
     var elf_header = std.elf.Header.read(&elf_buffer) catch |err| {
         panic("Failed to read ELF header\n", .{}, @src());
     };
-    print("Entry: 0x{x}", .{elf_header.entry});
+    print("[KERNEL] File size: {} bytes. Entry: 0x{x}", .{file_size, elf_header.entry});
 
     const kernel_size: u64 = blk:
     {
@@ -362,16 +356,11 @@ pub fn main() noreturn
 
         while (it.next() catch panic("Iterating pheaders", .{}, @src())) |ph|
         {
-            print("Type: {}. Address: 0x{x}", .{ph.p_type, ph.p_vaddr});
-
             if (ph.p_type == std.elf.PT_LOAD)
             {
                 const size_in_memory = ph.p_memsz;
-                print("Size in memory: {}", .{size_in_memory});
                 size = std.math.max(size, ph.p_memsz);
             }
-
-            print("", .{});
         }
 
         break :blk size;
@@ -393,8 +382,6 @@ pub fn main() noreturn
         else => @intCast(u64, font_header.char_size) * 256,
     };
 
-    print("Font buffer size: {}\n", .{font_buffer_size});
-
     assert_success(font_file.setPosition(psf_header_size), @src());
     var font_buffer_ptr: [*]u8 = undefined;
     assert_success(boot_services.allocatePool(.LoaderData, font_buffer_size, @ptrCast(*[*] align(8) u8, &font_buffer_ptr)), @src());
@@ -410,7 +397,6 @@ pub fn main() noreturn
 
     while (boot_services.getMemoryMap(&uefi_info.memory.size, uefi_info.memory.map, &memory_map_key, &uefi_info.memory.descriptor_size, &descriptor_version) == .BufferTooSmall)
     {
-        print("Allocating...\n", .{});
         assert_success(boot_services.allocatePool(.LoaderData, uefi_info.memory.size, @ptrCast(*[*] align(8) u8, &uefi_info.memory.map)), @src());
     }
 
@@ -425,10 +411,9 @@ pub fn main() noreturn
     {
         if (ph.p_type == std.elf.PT_LOAD)
         {
-            print("Load", .{});
             const target = ph.p_paddr;
             std.mem.copy(u8, @intToPtr([*]u8, target)[0..ph.p_filesz], file_content[ph.p_offset .. ph.p_offset + ph.p_filesz]);
-            print("Load", .{});
+
             if (ph.p_memsz > ph.p_filesz)
             {
                 std.mem.set(u8, @intToPtr([*]u8, target)[ph.p_filesz..ph.p_memsz], 0);
@@ -436,11 +421,10 @@ pub fn main() noreturn
         }
     }
 
+    assert_success(boot_services.exitBootServices(uefi.handle, memory_map_key), @src());
+
     const EntryPointType = fn(*BootData) callconv(.SysV) noreturn;
     const entry_point = @intToPtr(EntryPointType, elf_header.entry);
-
-    print("Entering entry point...", .{});
-    assert_success(boot_services.exitBootServices(uefi.handle, memory_map_key), @src());
 
     entry_point(&uefi_info);
 }
