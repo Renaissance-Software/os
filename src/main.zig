@@ -47,8 +47,8 @@ const Renderer = struct
         Renderer.height = boot_data.gop.height;
         Renderer.pixels_per_scanline = boot_data.gop.pixels_per_scanline;
 
-        const space_to_obviate = Renderer.character_size + (Renderer.height % Renderer.character_size);
-        Renderer.line_limit = Renderer.height - space_to_obviate;
+        Renderer.pixel_lines_to_obviate = Renderer.character_size + (Renderer.height % Renderer.character_size);
+        Renderer.line_limit = Renderer.height - Renderer.pixel_lines_to_obviate;
 
         renderer.clear(0xff000000);
 
@@ -122,16 +122,17 @@ const Renderer = struct
 
     fn scroll(self: *Renderer) void
     {
-        const lines_to_be_skipped = Renderer.character_size;
-        const lines_to_be_copied = Renderer.height - lines_to_be_skipped;
-        const line_to_clear_offset = lines_to_be_copied * Renderer.pixels_per_scanline;
-        const line_to_copy_offset = renderer.frame.len - line_to_clear_offset;
-        var dst = renderer.frame[0..line_to_clear_offset];
-        var src = renderer.frame[line_to_copy_offset .. renderer.frame.len];
-
+        const pixel_lines_per_char_line = Renderer.character_size;
+        const pixels_per_char_line = pixel_lines_per_char_line * Renderer.pixels_per_scanline;
+        const line_to_copy_start = pixels_per_char_line;
+        const line_offset = Renderer.height - Renderer.pixel_lines_to_obviate;
+        const pixel_offset = line_offset * pixels_per_scanline;
+        var dst = self.frame[0..pixel_offset];
+        var src = self.frame[line_to_copy_start..line_to_copy_start + pixel_offset];
         std.mem.copy(u32, dst, src);
 
-        for (self.frame[line_to_clear_offset ..]) |*pixel|
+        var clear_slice = self.frame[pixel_offset..];
+        for (clear_slice) |*pixel|
         {
             pixel.* = 0x000000ff;
         }
@@ -167,11 +168,13 @@ const Renderer = struct
     const character_width = 8;
 
     var pixels_per_scanline: u32 = undefined;
-    var character_size: u8 = undefined;
     var line_limit: u32 = undefined;
+    var pixel_lines_to_obviate: u32 = undefined;
 
     var width: u32 = undefined;
     var height: u32 = undefined;
+
+    var character_size: u8 = undefined;
 };
 
 fn print(comptime format: []const u8, args: anytype) void
@@ -386,8 +389,12 @@ export fn _start(boot_data: *uefi.BootData) callconv(.C) noreturn
     Renderer.init(boot_data);
     Memory.init(boot_data);
 
+    const remainder = renderer.frame.len / 800 % 16;
+    print("Remainder: {}\n", .{remainder});
+    print("Line limit: {}\n", .{Renderer.line_limit});
+
     var i: u64 = 0;
-    while (i < 100) : (i += 1)
+    while (i < 40) : (i += 1)
     {
         print("Hello world: {}\n", .{i});
     }
