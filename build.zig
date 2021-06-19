@@ -39,6 +39,7 @@ pub fn build(b: *std.build.Builder) void
             .os_tag = Target.Os.Tag.freestanding,
             .abi = Target.Abi.none,
         });
+    kernel.setLinkerScriptPath("kernel.ld");
     kernel.setOutputDir(".");
     kernel.install();
     kernel.step.dependOn(&uefi_bootloader.step);

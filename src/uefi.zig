@@ -21,23 +21,26 @@ fn print(comptime format: []const u8, args: anytype) void
     _ = con_out.outputString(&[_:0]u16 {'\r', '\n'});
 }
 
-
-fn panic(comptime format: []const u8, args: anytype, source: std.builtin.SourceLocation) noreturn
+fn panic(message: []const u8, stack_trace: ?*std.builtin.StackTrace) noreturn
 {
-    print("PANIC at {s}:{}:{}, {s}()", .{source.file, source.line, source.column, source.fn_name});
-    print(format, args);
-
+    print("Panic: {s}\n", .{message});
     while (true)
     {
     }
-    //arch.hlt();
+}
+
+fn my_panic(comptime format: []const u8, args: anytype, source: std.builtin.SourceLocation) noreturn
+{
+    var buffer: [8 * 1024]u8 = undefined;
+    const formatted_buffer = std.fmt.bufPrint(buffer[0..], "PANIC at {s}:{}:{}, {s}()", .{source.file, source.line, source.column, source.fn_name}) catch unreachable;
+    panic(formatted_buffer, null);
 }
 
 fn assert_eq(comptime T: type, a: T, b: T, source: std.builtin.SourceLocation) void
 {
     if (a != b)
     {
-        panic("{} != {}", .{a, b}, source);
+        my_panic("{} != {}", .{a, b}, source);
     }
 }
 
@@ -45,7 +48,7 @@ fn assert(condition: bool, source: std.builtin.SourceLocation) void
 {
     if (!condition)
     {
-        panic("Assert failed", .{}, source);
+        my_panic("Assert failed", .{}, source);
     }
 }
 
@@ -53,7 +56,7 @@ fn assert_success(result: uefi.Status, source: std.builtin.SourceLocation) void
 {
     if (result != uefi.Status.Success)
     {
-        panic("{s} failed: {}", .{source.fn_name, result}, source);
+        my_panic("{s} failed: {}", .{source.fn_name, result}, source);
     }
 }
 
@@ -327,44 +330,6 @@ pub fn main() noreturn
     var file_protocol: *uefi.protocols.FileProtocol = undefined;
     assert_success(sfs_proto.?.openVolume(&file_protocol), @src());
 
-    const kernel_file = load_file(file_protocol, "kernel.elf");
-
-    var file_size: u64 = 0;
-    assert_success(kernel_file.setPosition(uefi.protocols.FileProtocol.efi_file_position_end_of_file), @src());
-    assert_success(kernel_file.getPosition(&file_size), @src());
-    assert_success(kernel_file.setPosition(0), @src());
-
-    var file_content_ptr: [*]align(16) u8 = undefined;
-    assert_success(boot_services.allocatePool(.LoaderData, file_size, &file_content_ptr), @src());
-    assert_success(kernel_file.read(&file_size, file_content_ptr), @src());
-    if (file_size < @sizeOf(std.elf.Elf64_Ehdr))
-    {
-        panic("File size too small: {}\n", .{file_size}, @src());
-    }
-
-    const file_content = file_content_ptr[0..file_size];
-    var elf_buffer = std.io.fixedBufferStream(file_content);
-    var elf_header = std.elf.Header.read(&elf_buffer) catch |err| {
-        panic("Failed to read ELF header\n", .{}, @src());
-    };
-    print("[KERNEL] File size: {} bytes. Entry: 0x{x}", .{file_size, elf_header.entry});
-
-    const kernel_size: u64 = blk:
-    {
-        var it = elf_header.program_header_iterator(&elf_buffer);
-        var size: u64 = 0;
-
-        while (it.next() catch panic("Iterating pheaders", .{}, @src())) |ph|
-        {
-            if (ph.p_type == std.elf.PT_LOAD)
-            {
-                const size_in_memory = ph.p_memsz;
-                size = std.math.max(size, ph.p_memsz);
-            }
-        }
-
-        break :blk size;
-    };
 
     uefi_info.gop = GOP.initialize();
 
@@ -392,33 +357,56 @@ pub fn main() noreturn
         .size = font_buffer_size,
     };
 
+    const kernel_file = load_file(file_protocol, "kernel.elf");
+
+    var file_size: u64 = 0;
+    assert_success(kernel_file.setPosition(uefi.protocols.FileProtocol.efi_file_position_end_of_file), @src());
+    assert_success(kernel_file.getPosition(&file_size), @src());
+    assert_success(kernel_file.setPosition(0), @src());
+
+    var file_content_ptr: [*]align(16) u8 = undefined;
+    assert_success(boot_services.allocatePool(.LoaderData, file_size, &file_content_ptr), @src());
+    assert_success(kernel_file.read(&file_size, file_content_ptr), @src());
+    if (file_size < @sizeOf(std.elf.Elf64_Ehdr))
+    {
+        my_panic("File size too small: {}\n", .{file_size}, @src());
+    }
+
+    const file_content = file_content_ptr[0..file_size];
+    var file_buffer_stream = std.io.fixedBufferStream(file_content);
+    var elf_header = std.elf.Header.read(&file_buffer_stream) catch |err| {
+        my_panic("Failed to read ELF header\n", .{}, @src());
+    };
+    print("[KERNEL] File size: {} bytes. Entry: 0x{x}", .{file_size, elf_header.entry});
+
+    print("Getting memory map...\n", .{});
+    var it = elf_header.program_header_iterator(&file_buffer_stream);
+
+    const page_size = 0x1000;
+    while (it.next() catch my_panic("Iterating program headers", .{}, @src())) |ph|
+    {
+        if (ph.p_type == std.elf.PT_LOAD)
+        {
+            var physical = @intToPtr([*] align(4096) u8, ph.p_paddr);
+            var target = &physical;
+            const pages = (ph.p_memsz + page_size - 1) / page_size;
+            assert_success(boot_services.allocatePages(.AllocateAddress, .LoaderData, pages, target), @src());
+            std.mem.copy(u8, physical[0..ph.p_filesz], file_content[ph.p_offset .. ph.p_offset + ph.p_filesz]);
+
+            if (ph.p_memsz > ph.p_filesz)
+            {
+                std.mem.set(u8, physical[ph.p_filesz..ph.p_memsz], 0);
+            }
+        }
+    }
+
+
     var memory_map_key: usize = undefined;
     var descriptor_version: u32 = 0;
 
     while (boot_services.getMemoryMap(&uefi_info.memory.size, uefi_info.memory.map, &memory_map_key, &uefi_info.memory.descriptor_size, &descriptor_version) == .BufferTooSmall)
     {
         assert_success(boot_services.allocatePool(.LoaderData, uefi_info.memory.size, @ptrCast(*[*] align(8) u8, &uefi_info.memory.map)), @src());
-    }
-
-    var it = elf_header.program_header_iterator(&elf_buffer);
-    var phi: u64 = 0;
-
-    var largest_conventional: ?*uefi.tables.MemoryDescriptor = null;
-
-    const map_descriptors = uefi_info.memory.map[0..uefi_info.memory.size / uefi_info.memory.descriptor_size];
-
-    while (it.next() catch panic("Iterating program headers", .{}, @src())) |ph|
-    {
-        if (ph.p_type == std.elf.PT_LOAD)
-        {
-            const target = ph.p_paddr;
-            std.mem.copy(u8, @intToPtr([*]u8, target)[0..ph.p_filesz], file_content[ph.p_offset .. ph.p_offset + ph.p_filesz]);
-
-            if (ph.p_memsz > ph.p_filesz)
-            {
-                std.mem.set(u8, @intToPtr([*]u8, target)[ph.p_filesz..ph.p_memsz], 0);
-            }
-        }
     }
 
     assert_success(boot_services.exitBootServices(uefi.handle, memory_map_key), @src());

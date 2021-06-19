@@ -1,6 +1,6 @@
 const std = @import("std");
 const uefi = @import("uefi.zig");
-const arch = @import("arch/x86_64/intrinsics.zig");
+const x86_64 = @import("arch/x86_64/intrinsics.zig");
 const PSF = @import("psf.zig");
 
 const Point = extern struct
@@ -21,7 +21,7 @@ pub fn panic(message: []const u8, stack_trace: ?*std.builtin.StackTrace) noretur
     @setCold(true);
     print("Panic: {s}\n", .{message});
 
-    arch.hlt();
+    x86_64.halt_loop();
 }
 
 const Renderer = struct
@@ -135,7 +135,7 @@ const Renderer = struct
         var clear_slice = self.frame[pixel_offset..];
         for (clear_slice) |*pixel|
         {
-            pixel.* = 0x000000ff;
+            pixel.* = 0xff000000;
         }
 
         self.x = 0;
@@ -400,5 +400,5 @@ export fn _start(boot_data: *uefi.BootData) callconv(.SysV) noreturn
         print("Hello world: {}\n", .{i});
     }
 
-    arch.hlt();
+    x86_64.halt_loop();
 }
