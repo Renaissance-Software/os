@@ -19,19 +19,25 @@ pub fn build(b: *std.build.Builder) void
     uefi_bootloader.setOutputDir(install_dir);
     uefi_bootloader.install();
 
-    const cmd = &[_][]const u8
+    const qemu_base_command = &[_][]const u8
     {
         "qemu-system-x86_64",
-        //"-nographic",
+        "-no-shutdown",
+        "-no-reboot",
+        "-serial",
+        "stdio",
         "-bios",
         "ovmf/OVMF_CODE-pure-efi.fd",
         "-hdd",
         "fat:rw:.",
-        "-serial",
-        "stdio",
+        "-d",
+        "guest_errors,int,cpu_reset",
     };
 
+    const cmd = qemu_base_command;
+
     const kernel = b.addExecutable("kernel.elf", "src/main.zig");
+    kernel.addAssemblyFile("src/arch/x86_64/boot.S");
     kernel.setBuildMode(b.standardReleaseOptions());
     kernel.setTarget(CrossTarget
         {
@@ -51,19 +57,9 @@ pub fn build(b: *std.build.Builder) void
     run_command.dependOn(&kernel.step);
     run_command.dependOn(&run_step.step);
 
-    const debug_cmd = &[_][]const u8
-    {
-        "qemu-system-x86_64",
-        "-bios",
-        "ovmf/OVMF_CODE-pure-efi.fd",
-        "-hdd",
-        "fat:rw:.",
-        "-serial",
-        "stdio",
-        "-S",
-        "-s",
-    };
+    const qemu_debug_options = &[_][]const u8 { "-S", "-s", };
 
+    const debug_cmd = qemu_base_command ++ qemu_debug_options;
     const debug_step = b.addSystemCommand(debug_cmd);
 
     const debug_command = b.step("debug", "Debug the kernel");

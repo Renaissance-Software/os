@@ -379,31 +379,36 @@ pub fn main() noreturn
     };
     print("[KERNEL] File size: {} bytes. Entry: 0x{x}", .{file_size, elf_header.entry});
 
-    print("Getting memory map...\n", .{});
     var it = elf_header.program_header_iterator(&file_buffer_stream);
 
+    print("Allocating ELF segments...", .{});
     const page_size = 0x1000;
+    var kernel_start: u64 = 0;
     while (it.next() catch my_panic("Iterating program headers", .{}, @src())) |ph|
     {
         if (ph.p_type == std.elf.PT_LOAD)
         {
-            var physical = @intToPtr([*] align(4096) u8, ph.p_paddr);
-            var target = &physical;
             const pages = (ph.p_memsz + page_size - 1) / page_size;
+            print("Physical: 0x{x}. Size in memory: 0x{x}. Pages: {}", .{ph.p_paddr, ph.p_memsz, pages});
+            var physical = @intToPtr([*]u8, ph.p_paddr);
+            var target = @ptrCast(*[*] align(4096) u8, &physical);
             assert_success(boot_services.allocatePages(.AllocateAddress, .LoaderData, pages, target), @src());
+            print("Pages successfully allocated!", .{});
+
             std.mem.copy(u8, physical[0..ph.p_filesz], file_content[ph.p_offset .. ph.p_offset + ph.p_filesz]);
 
             if (ph.p_memsz > ph.p_filesz)
             {
                 std.mem.set(u8, physical[ph.p_filesz..ph.p_memsz], 0);
             }
+            print("ELF segment successfully copied!", .{});
         }
     }
-
 
     var memory_map_key: usize = undefined;
     var descriptor_version: u32 = 0;
 
+    print("Getting memory map...\n", .{});
     while (boot_services.getMemoryMap(&uefi_info.memory.size, uefi_info.memory.map, &memory_map_key, &uefi_info.memory.descriptor_size, &descriptor_version) == .BufferTooSmall)
     {
         assert_success(boot_services.allocatePool(.LoaderData, uefi_info.memory.size, @ptrCast(*[*] align(8) u8, &uefi_info.memory.map)), @src());

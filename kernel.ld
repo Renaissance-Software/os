@@ -22,5 +22,9 @@ SECTIONS
 		*(COMMON)
 		*(.bss)
 	}
+    .got : ALIGN(0x1000)
+    {
+        *(.got)
+    }
 	_KernelEnd = .;
 }
