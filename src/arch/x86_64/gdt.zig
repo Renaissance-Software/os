@@ -44,7 +44,7 @@ pub const GDT = extern struct
         load_gdt(&GDT.descriptor);
     }
 
-    const default = GDT
+    export const default align(0x1000) = GDT 
     {
         .kernel_null = Entry
         {

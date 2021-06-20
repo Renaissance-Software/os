@@ -49,15 +49,16 @@ export fn kernel_main(boot_data: *uefi.BootData) callconv(.SysV) noreturn
             page_manager.map(&page_allocator, page_address, page_address);
         }
 
-        asm volatile("mov %[in], %%cr3" : : [in] "r" (pml4_address));
+        asm volatile("mov %[in], %%cr3" : : [in] "r" (pml4_address) : "memory");
     }
     else
     {
         kpanic("unable to obtain pml4 page\n", .{});
     }
-
     renderer_module.renderer.clear(0xff000000);
-    Interrupts.setup(&page_allocator);
+    print("Paging setup\nFree memory: {}.\nUsed memory: {}\n", .{page_allocator.free_memory, page_allocator.used_memory});
+
+    //Interrupts.setup(&page_allocator);
 
     while (true)
     {

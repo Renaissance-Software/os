@@ -37,15 +37,18 @@ const PDE = struct
     fn mask(pde: u64, bit: PDE.Bit, enabled: bool) u64
     {
         const bitmask: u64 = @intCast(u64, 1) << @enumToInt(bit);
-        const and_not_mask = pde & ~bitmask;
-        const result = and_not_mask | (bitmask * @boolToInt(enabled));
+        var result = (pde & ~bitmask);
+        if (enabled)
+        {
+            result |= bitmask;
+        }
         return result;
     }
 
     fn get_bit(pde: u64, pde_bit: PDE.Bit) bool
     {
         const bitmask: u64 = @intCast(u64, 1) << @enumToInt(pde_bit);
-        return (pde & bitmask) != 0;
+        return (pde & bitmask) > 0;
     }
 
     fn get_address(pde: u64) u64
@@ -56,9 +59,8 @@ const PDE = struct
     fn compute_address(pde: u64, address: u64) u64
     {
         const masked_address = address & 0x000000ffffffffff;
-        const pde_and = pde & 0xfff0000000000fff;
 
-        return pde | (masked_address << 12);
+        return (pde & 0xfff0000000000fff) | (masked_address << 12);
     }
 
     const Type = u64;
@@ -68,9 +70,9 @@ pub const PageTable = extern struct
 {
     entries: [512]u64,
 
-    fn prepare_page_table(self: *PageTable, page_allocator: *PageAllocator, entry_index: u64) * align(0x1000) PageTable
+    fn prepare_page_table(self: *PageTable, page_allocator: *PageAllocator, entry_index: u64, previous_page_table: *PageTable) * align(0x1000) PageTable
     {
-        var pde = self.entries[entry_index];
+        var pde = previous_page_table.entries[entry_index];
         const page_table: * align(0x1000) PageTable = blk:
         {
             if (!PDE.get_bit(pde, .present))
@@ -80,7 +82,7 @@ pub const PageTable = extern struct
                     pde = PDE.compute_address(pde, @ptrToInt(page) >> 12);
                     pde = PDE.mask(pde, .present, true);
                     pde = PDE.mask(pde, .read_write, true);
-                    self.entries[entry_index] = pde;
+                    previous_page_table.entries[entry_index] = pde;
                     break :blk @ptrCast(* align(0x1000) PageTable, page);
                 }
                 else
@@ -120,16 +122,10 @@ pub const PageTable = extern struct
             };
         };
 
-        //print("PMI: {}\n", .{pmi});
+        const pdp = self.prepare_page_table(page_allocator, pmi.PDP_i, self);
+        const pd = self.prepare_page_table(page_allocator, pmi.PD_i, pdp);
+        const pt = self.prepare_page_table(page_allocator, pmi.PT_i, pd);
 
-        //print("Doing PDP...\n", .{});
-        const pdp = self.prepare_page_table(page_allocator, pmi.PDP_i);
-        //print("Doing PD...\n", .{});
-        const pd = self.prepare_page_table(page_allocator, pmi.PD_i);
-        //print("Doing PT...\n", .{});
-        const pt = self.prepare_page_table(page_allocator, pmi.PT_i);
-
-        //print("Doing P...\n", .{});
         var pde = pt.entries[pmi.P_i];
         pde = PDE.compute_address(pde, physical >> 12);
         pde = PDE.mask(pde, .present, true);
@@ -322,9 +318,11 @@ pub const PageAllocator = struct
             return;
         }
 
-        self.set_page_reserved(index, false);
-        self.free_memory += page_size;
-        self.used_memory -= page_size;
+        if (self.set_page_reserved(index, false) == .Unreserved)
+        {
+            self.free_memory += page_size;
+            self.used_memory -= page_size;
+        }
     }
 };
 
