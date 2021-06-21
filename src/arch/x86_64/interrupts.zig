@@ -6,6 +6,10 @@ const PageAllocator = Paging.PageAllocator;
 const print = @import("../../renderer.zig").print;
 const kpanic = @import("../../panic.zig").kpanic;
 const range = @import("range.zig").range;
+const ports = @import("intrinsics.zig");
+const inb = ports.inb;
+const outb = ports.outb;
+const io_wait = ports.io_wait;
 
 const IDT = struct
 {
@@ -219,7 +223,7 @@ fn has_error_code(interrupt_number: u64) bool
 
 fn unhandled_interrupt(frame: *InterruptFrame) void
 {
-    kpanic("Unhandled interrupt: {}", .{frame.intnum});
+    print("Unhandled interrupt: {}", .{frame.intnum});
 }
 
 fn double_fault_handler(frame: *InterruptFrame) void
@@ -237,6 +241,57 @@ fn general_protection_fault_handler(frame: *InterruptFrame) void
     kpanic("General protection fault: {}", .{frame.*});
 }
 
+const PIC = struct
+{
+    const Data = struct
+    {
+        command: u8,
+        data: u8,
+    };
+
+    const PIC1 = Data { .command = 0x20, .data = 0x21 };
+    const PIC2 = Data { .command = 0xa0, .data = 0xa1 };
+    const EOI = 0x20;
+    const ICW1_init = 0x10;
+    const ICW1_ICW4 = 0x01;
+    const ICW4_8086 = 0x01;
+
+    fn remap() void
+    {
+        var a1: u8 = undefined;
+        var a2: u8 = undefined;
+
+        a1 = inb(PIC1.data);
+        io_wait();
+        a2 = inb(PIC2.data);
+        io_wait();
+
+        outb(PIC1.command, ICW1_init |ICW1_ICW4);
+        io_wait();
+        outb(PIC2.command, ICW1_init |ICW1_ICW4);
+        io_wait();
+
+        outb(PIC1.data, 0x20);
+        io_wait();
+        outb(PIC2.data, 0x28);
+        io_wait();
+
+        outb(PIC1.data, 4);
+        io_wait();
+        outb(PIC2.data, 2);
+        io_wait();
+
+        outb(PIC1.data, ICW4_8086);
+        io_wait();
+        outb(PIC2.data, ICW4_8086);
+        io_wait();
+
+        outb(PIC1.data, a1);
+        io_wait();
+        outb(PIC2.data, a2);
+    }
+};
+
 pub fn setup(page_allocator: *PageAllocator) void
 {
     inline for (IDT.table) |*table_entry, interrupt_number|
@@ -252,7 +307,10 @@ pub fn setup(page_allocator: *PageAllocator) void
     IDT.register.limit = IDT.size - 1;
     IDT.register.address = @ptrToInt(&IDT.table[0]);
     asm volatile("lidt (%[idtr_addr])" : : [idtr_addr] "r" (&IDT.register));
-    asm volatile("sti");
 
-    print("Interrupts setup\n", .{});
+    PIC.remap();
+    outb(PIC.PIC1.data, 0b11111101);
+    outb(PIC.PIC2.data, 0b11111111);
+
+    asm volatile("sti");
 }

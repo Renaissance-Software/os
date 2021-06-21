@@ -58,9 +58,8 @@ export fn kernel_main(boot_data: *uefi.BootData) callconv(.SysV) noreturn
     renderer_module.renderer.clear(0xff000000);
     print("Paging setup\nFree memory: {}.\nUsed memory: {}\n", .{page_allocator.free_memory, page_allocator.used_memory});
 
-    //Interrupts.setup(&page_allocator);
+    Interrupts.setup(&page_allocator);
+    print("Interrupts setup\n", .{});
 
-    while (true)
-    {
-    }
+    x86_64.halt_loop();
 }

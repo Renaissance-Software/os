@@ -34,7 +34,7 @@ pub fn build(b: *std.build.Builder) void
         "guest_errors,int,cpu_reset",
     };
 
-    const cmd = qemu_base_command;
+    const qemu_run_command = qemu_base_command;
 
     const kernel = b.addExecutable("kernel.elf", "src/main.zig");
     kernel.addAssemblyFile("src/arch/x86_64/boot.S");
@@ -50,7 +50,7 @@ pub fn build(b: *std.build.Builder) void
     kernel.install();
     kernel.step.dependOn(&uefi_bootloader.step);
 
-    const run_step = b.addSystemCommand(cmd);
+    const run_step = b.addSystemCommand(qemu_run_command);
 
     const run_command = b.step("run", "Run the kernel");
     run_command.dependOn(&uefi_bootloader.step);
@@ -59,8 +59,8 @@ pub fn build(b: *std.build.Builder) void
 
     const qemu_debug_options = &[_][]const u8 { "-S", "-s", };
 
-    const debug_cmd = qemu_base_command ++ qemu_debug_options;
-    const debug_step = b.addSystemCommand(debug_cmd);
+    const qemu_debug_cmd = qemu_base_command ++ qemu_debug_options;
+    const debug_step = b.addSystemCommand(qemu_debug_cmd);
 
     const debug_command = b.step("debug", "Debug the kernel");
     debug_command.dependOn(&uefi_bootloader.step);
