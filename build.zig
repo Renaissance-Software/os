@@ -22,6 +22,8 @@ pub fn build(b: *std.build.Builder) void
     const qemu_base_command = &[_][]const u8
     {
         "qemu-system-x86_64",
+        "-M", "q35",
+        "-m", "2048M",
         "-no-shutdown",
         "-no-reboot",
         "-serial",

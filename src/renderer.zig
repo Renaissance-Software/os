@@ -133,6 +133,8 @@ pub const Renderer = struct
 
     pub fn clear(self: *Renderer, color: u32) void
     {
+        const frame_address = @ptrToInt(self.frame.ptr);
+        const frame_top = frame_address + self.frame.len;
         std.mem.set(u32, self.frame, color);
     }
 

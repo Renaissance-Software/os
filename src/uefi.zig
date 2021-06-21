@@ -296,6 +296,7 @@ pub const BootData = extern struct
     gop: GOP,
     font: PSF.Font,
     memory: Memory,
+    rsdp_address: u64,
 };
 
 var uefi_info: BootData = undefined;
@@ -405,6 +406,27 @@ pub fn main() noreturn
         }
     }
 
+    var configuration_table = uefi.system_table.configuration_table;
+    const acpi2_table_guid = uefi.tables.ConfigurationTable.acpi_20_table_guid;
+
+    const rsdp_address: u64 = blk:
+    {
+        for (configuration_table[0..uefi.system_table.number_of_table_entries]) |conf_table|
+        {
+            if (uefi.Guid.eql(conf_table.vendor_guid, acpi2_table_guid))
+            {
+                const vendor_table = @ptrCast([*]u8, conf_table.vendor_table);
+                if (std.mem.eql(u8, "RSD PTR ", vendor_table[0..8]))
+                {
+                    break :blk @ptrToInt(vendor_table);
+                }
+            }
+
+        }
+        panic("RSDP not found", null);
+    };
+
+    uefi_info.rsdp_address = rsdp_address;
     var memory_map_key: usize = undefined;
     var descriptor_version: u32 = 0;
 

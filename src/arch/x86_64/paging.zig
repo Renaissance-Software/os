@@ -260,6 +260,8 @@ pub const PageAllocator = struct
     {
         if (index >= self.bitmap.len * 8)
         {
+            // @TODO: fix with anothe mapping algorithm
+            //kpanic("Index out of bounds. Index: {}. Bytemap (*8): {}\n", .{index, self.bitmap.len * 8});
             return .OutOfBounds;
         }
 
@@ -302,10 +304,14 @@ pub const PageAllocator = struct
         const page_index = address / page_size;
         if (!self.is_page_reserved(page_index))
         {
-            if (self.set_page_reserved(page_index, true) == .Reserved)
+            switch (self.set_page_reserved(page_index, true))
             {
-                self.free_memory -= page_size;
-                self.used_memory += page_size;
+                .Reserved =>
+                {
+                    self.free_memory -= page_size;
+                    self.used_memory += page_size;
+                },
+                else => {}
             }
         }
     }
