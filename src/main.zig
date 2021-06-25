@@ -5,12 +5,11 @@ const renderer_module = @import("renderer.zig");
 const print = renderer_module.print;
 const Renderer = renderer_module.Renderer;
 const Paging = @import("arch/x86_64/paging.zig");
-const PageAllocator = Paging.PageAllocator;
-const PageTable = Paging.PageTable;
 const GDT = @import("arch/x86_64/gdt.zig").GDT;
 const Interrupts = @import("arch/x86_64/interrupts.zig");
 const kpanic = @import("panic.zig").kpanic;
 const ACPI = @import("acpi.zig");
+const CPU = @import("arch/x86_64/cpu.zig");
 
 pub fn panic(message: []const u8, stack_trace: ?*std.builtin.StackTrace) noreturn
 {
@@ -23,48 +22,20 @@ pub fn panic(message: []const u8, stack_trace: ?*std.builtin.StackTrace) noretur
 export fn kernel_main(boot_data: *uefi.BootData) callconv(.SysV) noreturn
 {
     Renderer.init(boot_data);
+    //GDT.init();
+    Paging.init(boot_data);
 
-    GDT.init();
-
-    var page_allocator = PageAllocator.init(boot_data);
-
-    if (page_allocator.request_zero_page()) |pml4_ptr|
-    {
-        const pml4_address = @ptrToInt(pml4_ptr);
-        var page_manager = @ptrCast(* align(0x1000) PageTable, pml4_ptr);
-        var page_address : u64 = 0;
-        while (page_address < Paging.size) : (page_address += Paging.page_size)
-        {
-            page_manager.map(&page_allocator, page_address, page_address);
-        }
-
-        const fb_base = boot_data.gop.base;
-        const fb_size = boot_data.gop.size + 0x1000;
-        page_allocator.reserve_pages(fb_base, fb_size / Paging.page_size + 1);
-
-        page_address = fb_base;
-        const fb_top = fb_base + fb_size;
-        //print("FB top: 0x{x}\n", .{fb_top});
-        while (page_address < fb_top) : (page_address += Paging.page_size)
-        {
-            page_manager.map(&page_allocator, page_address, page_address);
-        }
-
-        asm volatile("mov %[in], %%cr3" : : [in] "r" (pml4_address) : "memory");
-    }
-    else
-    {
-        kpanic("unable to obtain pml4 page\n", .{});
-    }
 
     renderer_module.renderer.clear(0xff000000);
+    print("Paging setup\nFree memory: {}.\nUsed memory: {}\n", .{Paging.free_memory, Paging.used_memory});
 
-    print("Memory: 0x{x}\nFB base: 0x{x}\n", .{Paging.size, 0xc0000000});
-    Interrupts.setup(&page_allocator);
-    print("Paging setup\nFree memory: {}.\nUsed memory: {}\n", .{page_allocator.free_memory, page_allocator.used_memory});
-    print("Interrupts setup\n", .{});
-    print("RSDP: 0x{x}\n", .{boot_data.rsdp_address});
     ACPI.setup(boot_data.rsdp_address);
+    print("ACPI setup correctly\n", .{});
+
+    Interrupts.setup();
+    print("Interrupts setup\n", .{});
+
+    CPU.init_bsp();
 
     print("Kernel initialized successfully\n", .{});
 

@@ -39,7 +39,7 @@ pub fn build(b: *std.build.Builder) void
     const qemu_run_command = qemu_base_command;
 
     const kernel = b.addExecutable("kernel.elf", "src/main.zig");
-    kernel.addAssemblyFile("src/arch/x86_64/boot.S");
+    kernel.addAssemblyFile("src/arch/x86_64/start.S");
     kernel.setBuildMode(b.standardReleaseOptions());
     kernel.setTarget(CrossTarget
         {
