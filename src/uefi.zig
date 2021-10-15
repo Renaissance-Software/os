@@ -2,6 +2,7 @@ const std = @import("std");
 const uefi = std.os.uefi;
 const PSF = @import("psf.zig");
 const arch = @import("arch/x86_64/intrinsics.zig");
+const Paging = @import("arch/x86_64/paging.zig");
 
 var con_out: *uefi.protocols.SimpleTextOutputProtocol = undefined;
 var boot_services: *uefi.tables.BootServices = undefined;
@@ -21,15 +22,13 @@ fn print(comptime format: []const u8, args: anytype) void
     _ = con_out.outputString(&[_:0]u16 {'\r', '\n'});
 }
 
-fn panic(message: []const u8, stack_trace: ?*std.builtin.StackTrace) noreturn
+pub fn panic(message: []const u8, stack_trace: ?*std.builtin.StackTrace) noreturn
 {
     print("Panic: {s}\n", .{message});
-    while (true)
-    {
-    }
+    while (true) { }
 }
 
-fn my_panic(comptime format: []const u8, args: anytype, source: std.builtin.SourceLocation) noreturn
+fn uefi_panic(comptime format: []const u8, args: anytype, source: std.builtin.SourceLocation) noreturn
 {
     var buffer: [8 * 1024]u8 = undefined;
     const formatted_buffer = std.fmt.bufPrint(buffer[0..], "PANIC at {s}:{}:{}, {s}()", .{source.file, source.line, source.column, source.fn_name}) catch unreachable;
@@ -40,7 +39,7 @@ fn assert_eq(comptime T: type, a: T, b: T, source: std.builtin.SourceLocation) v
 {
     if (a != b)
     {
-        my_panic("{} != {}", .{a, b}, source);
+        uefi_panic("{} != {}", .{a, b}, source);
     }
 }
 
@@ -48,7 +47,7 @@ fn assert(condition: bool, source: std.builtin.SourceLocation) void
 {
     if (!condition)
     {
-        my_panic("Assert failed", .{}, source);
+        uefi_panic("Assert failed", .{}, source);
     }
 }
 
@@ -56,7 +55,7 @@ fn assert_success(result: uefi.Status, source: std.builtin.SourceLocation) void
 {
     if (result != uefi.Status.Success)
     {
-        my_panic("{s} failed: {}", .{source.fn_name, result}, source);
+        uefi_panic("{s} failed: {}", .{source.fn_name, result}, source);
     }
 }
 
@@ -297,6 +296,10 @@ pub const BootData = extern struct
     font: PSF.Font,
     memory: Memory,
     rsdp_address: u64,
+    kernel_virtual_start: u64,
+    kernel_virtual_end: u64,
+    kernel_content: u64,
+    kernel_size: u64,
 };
 
 var uefi_info: BootData = undefined;
@@ -331,8 +334,31 @@ pub fn main() noreturn
     var file_protocol: *uefi.protocols.FileProtocol = undefined;
     assert_success(sfs_proto.?.openVolume(&file_protocol), @src());
 
-
     uefi_info.gop = GOP.initialize();
+
+    var configuration_table = uefi.system_table.configuration_table;
+    const acpi2_table_guid = uefi.tables.ConfigurationTable.acpi_20_table_guid;
+
+    const rsdp_address: u64 = blk:
+    {
+        for (configuration_table[0..uefi.system_table.number_of_table_entries]) |conf_table|
+        {
+            if (uefi.Guid.eql(conf_table.vendor_guid, acpi2_table_guid))
+            {
+                const vendor_table = @ptrCast([*]u8, conf_table.vendor_table);
+                if (std.mem.eql(u8, "RSD PTR ", vendor_table[0..8]))
+                {
+                    break :blk @ptrToInt(vendor_table);
+                }
+            }
+
+        }
+        panic("RSDP not found", null);
+    };
+
+    uefi_info.rsdp_address = rsdp_address;
+    var memory_map_key: usize = undefined;
+    var descriptor_version: u32 = 0;
 
     const font_file = load_file(file_protocol, "zap-light16.psf");
     var font_header: *PSF.Header = undefined;
@@ -365,70 +391,82 @@ pub fn main() noreturn
     assert_success(kernel_file.getPosition(&file_size), @src());
     assert_success(kernel_file.setPosition(0), @src());
 
-    var file_content_ptr: [*]align(16) u8 = undefined;
-    assert_success(boot_services.allocatePool(.LoaderData, file_size, &file_content_ptr), @src());
+    var file_content_ptr: [*]align(0x1000) u8 = undefined;
+    const page_size = 0x1000;
+    assert_success(boot_services.allocatePool(.LoaderData, file_size, @ptrCast(*[*] align(8) u8, &file_content_ptr)), @src());
     assert_success(kernel_file.read(&file_size, file_content_ptr), @src());
     if (file_size < @sizeOf(std.elf.Elf64_Ehdr))
     {
-        my_panic("File size too small: {}\n", .{file_size}, @src());
+        uefi_panic("File size too small: {}\n", .{file_size}, @src());
     }
 
     const file_content = file_content_ptr[0..file_size];
     var file_buffer_stream = std.io.fixedBufferStream(file_content);
     var elf_header = std.elf.Header.read(&file_buffer_stream) catch |err| {
-        my_panic("Failed to read ELF header\n", .{}, @src());
+        uefi_panic("Failed to read ELF header\n", .{}, @src());
     };
     print("[KERNEL] File size: {} bytes. Entry: 0x{x}", .{file_size, elf_header.entry});
 
+
     var it = elf_header.program_header_iterator(&file_buffer_stream);
 
-    print("Allocating ELF segments...", .{});
-    const page_size = 0x1000;
-    var kernel_start: u64 = 0;
-    while (it.next() catch my_panic("Iterating program headers", .{}, @src())) |ph|
+    var kernel_virtual_base: u64 = 0;
+    var kernel_size: u64 = 0;
+    var kernel_page_count: u64 = 0;
+    var found_got = false;
+    while (it.next() catch uefi_panic("Iterating program headers", .{}, @src())) |ph|
     {
         if (ph.p_type == std.elf.PT_LOAD)
         {
-            const pages = (ph.p_memsz + page_size - 1) / page_size;
-            print("Physical: 0x{x}. Size in memory: 0x{x}. Pages: {}", .{ph.p_paddr, ph.p_memsz, pages});
-            var physical = @intToPtr([*]u8, ph.p_paddr);
-            var target = @ptrCast(*[*] align(4096) u8, &physical);
-            assert_success(boot_services.allocatePages(.AllocateAddress, .LoaderData, pages, target), @src());
-            print("Pages successfully allocated!", .{});
-
-            std.mem.copy(u8, physical[0..ph.p_filesz], file_content[ph.p_offset .. ph.p_offset + ph.p_filesz]);
-
-            if (ph.p_memsz > ph.p_filesz)
+            if (kernel_virtual_base == 0)
             {
-                std.mem.set(u8, physical[ph.p_filesz..ph.p_memsz], 0);
+                kernel_virtual_base = ph.p_vaddr;
             }
-            print("ELF segment successfully copied!", .{});
+            print("PH: {}\n. Offset: 0x{x}\n", .{ph, ph.p_offset});
+            const segment_size = ph.p_memsz;
+            kernel_size += segment_size;
+            var segment_page_count = segment_size / 0x1000;
+            if (segment_size % 0x1000 != 0)
+            {
+                segment_page_count += 1;
+            }
+
+            if (!found_got and segment_size == 0x10)
+            {
+                found_got = true;
+                const got_offset = ph.p_offset;
+                print("Physical: 0x{x}. Virtual: 0x{x}. Offset: 0x{x}\n", .{ph.p_paddr, ph.p_vaddr, got_offset});
+                var got_section_slice = @ptrCast([*] align(1) u64, &file_content[ph.p_offset])[0..(ph.p_filesz / @sizeOf(u64))];
+                assert(got_section_slice.len == 2, @src());
+                assert(got_section_slice[0] == kernel_virtual_base, @src());
+                uefi_info.kernel_virtual_start = got_section_slice[0];
+                uefi_info.kernel_virtual_end = got_section_slice[1];
+                print("KS: 0x{x}. KE: 0x{x}\n", .{uefi_info.kernel_virtual_start, uefi_info.kernel_virtual_end});
+            }
+
+            kernel_page_count += segment_page_count;
         }
     }
 
-    var configuration_table = uefi.system_table.configuration_table;
-    const acpi2_table_guid = uefi.tables.ConfigurationTable.acpi_20_table_guid;
+    assert(found_got, @src());
 
-    const rsdp_address: u64 = blk:
+    const kernel_size2 = uefi_info.kernel_virtual_end - uefi_info.kernel_virtual_start;
+    print("Kernel size: 0x{x}\n", .{kernel_size2});
+    assert(kernel_size2 > kernel_size, @src());
+    var kernel_page_count_2 = kernel_size2 / page_size;
+    if (kernel_size2 % page_size != 0)
     {
-        for (configuration_table[0..uefi.system_table.number_of_table_entries]) |conf_table|
-        {
-            if (uefi.Guid.eql(conf_table.vendor_guid, acpi2_table_guid))
-            {
-                const vendor_table = @ptrCast([*]u8, conf_table.vendor_table);
-                if (std.mem.eql(u8, "RSD PTR ", vendor_table[0..8]))
-                {
-                    break :blk @ptrToInt(vendor_table);
-                }
-            }
+        kernel_page_count_2 += 1;
+    }
+    assert(kernel_page_count_2 == kernel_page_count, @src());
 
-        }
-        panic("RSDP not found", null);
-    };
-
-    uefi_info.rsdp_address = rsdp_address;
-    var memory_map_key: usize = undefined;
-    var descriptor_version: u32 = 0;
+    var kernel_content: [*] align(0x1000) u8 = undefined;
+    assert_success(boot_services.allocatePages(.AllocateAnyPages, .LoaderData, kernel_page_count, &kernel_content), @src());
+    std.mem.copy(u8, kernel_content[0..kernel_size2], file_content[0..kernel_size2]);
+    print("Kernel address: {*}\n", .{kernel_content});
+    uefi_info.kernel_content = @ptrToInt(kernel_content);
+    uefi_info.kernel_size = kernel_size2;
+    assert_success(boot_services.freePool(file_content_ptr), @src());
 
     print("Getting memory map...\n", .{});
     while (boot_services.getMemoryMap(&uefi_info.memory.size, uefi_info.memory.map, &memory_map_key, &uefi_info.memory.descriptor_size, &descriptor_version) == .BufferTooSmall)
@@ -437,6 +475,8 @@ pub fn main() noreturn
     }
 
     assert_success(boot_services.exitBootServices(uefi.handle, memory_map_key), @src());
+
+    Paging.init(&uefi_info);
 
     const EntryPointType = fn(*BootData) callconv(.SysV) noreturn;
     const entry_point = @intToPtr(EntryPointType, elf_header.entry);

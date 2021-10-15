@@ -9,8 +9,18 @@ _start:
 
 .global load_gdt
 load_gdt:
+    mov dx, 0x10
     lgdt [rdi]
+    // Mine
+    mov ds, dx
+    mov es, dx
+    mov fs, dx
+    mov gs, dx
+    mov ss, dx
+    // Mine
     mov ax, si
+    or ax, 3
+    //or ax, 3
     ltr ax
     pop rsi
     mov rdi, rsp

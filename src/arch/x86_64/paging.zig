@@ -4,11 +4,9 @@ const root = @import("root");
 const kpanic = @import("../../panic.zig").kpanic;
 const APIC = @import("apic.zig");
 
-extern const _KernelEnd: u64;
-extern const _KernelStart: u64;
-
 pub var memory_size: u64 = 0;
-pub const page_size = 4096;
+pub const page_size = 0x1000;
+
 
 const PageMapIndexer = extern struct
 {
@@ -102,43 +100,6 @@ fn prepare_page_table(entry_index: u64, previous_page_table: * align (0x1000) Pa
     return page_table;
 }
 
-fn foo() void
-{
-    var page_manager = blk:
-    {
-        if (page_allocator.request_zero_page()) |pml4_ptr|
-        {
-            const pml4_address = @ptrToInt(pml4_ptr);
-            pml4 = @ptrCast(* align(0x1000) PageTable, pml4_ptr);
-            var page_address : u64 = 0;
-            while (page_address < Paging.size) : (page_address += Paging.page_size)
-            {
-                page_manager.map(&page_allocator, page_address, page_address);
-            }
-
-            const fb_base = boot_data.gop.base;
-            const fb_size = boot_data.gop.size + 0x1000;
-            page_allocator.reserve_pages(fb_base, fb_size / Paging.page_size + 1);
-
-            page_address = fb_base;
-            const fb_top = fb_base + fb_size;
-            //print("FB top: 0x{x}\n", .{fb_top});
-            while (page_address < fb_top) : (page_address += Paging.page_size)
-            {
-                page_manager.map(&page_allocator, page_address, page_address);
-            }
-
-            asm volatile("mov %[in], %%cr3" : : [in] "r" (pml4_address) : "memory");
-
-            break :blk page_manager;
-        }
-        else
-        {
-            kpanic("unable to obtain pml4 page\n", .{});
-        }
-    };
-}
-
 pub var pml4: * align(0x1000) PageTable = undefined;
 
 pub fn map(virtual: u64, physical: u64) void
@@ -221,13 +182,22 @@ pub fn init(boot_data: *uefi.BootData) void
         }
     }
 
-    const kernel_start = @ptrToInt(&_KernelStart);
-    const kernel_end = @ptrToInt(&_KernelEnd);
+    const kernel_start = boot_data.kernel_virtual_start;
+    const kernel_end = boot_data.kernel_virtual_end;
     const kernel_size = kernel_end - kernel_start;
     const kernel_page_count = kernel_size / page_size + 1;
     reserve_pages(kernel_start, kernel_page_count);
 
+    var kernel_virtual: u64 = kernel_start;
+    var kernel_physical: u64 = boot_data.kernel_content;
+    while (kernel_virtual < kernel_end) : ({kernel_virtual += page_size; kernel_physical += page_size; })
+    {
+        map(kernel_virtual, kernel_physical);
+    }
+
     reserve_pages(APIC.LAPIC.trampoline_target, 1);
+
+    asm volatile("mov %[in], %%cr3" : : [in] "r" (@ptrToInt(pml4)));
 }
 
 pub fn request_pages(page_count: u64) ?Result
